@@ -95,6 +95,77 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 print(f"Unexpected error while sending error response: {e}")
 
+    def do_PATCH(self):
+        """Handle rename requests"""
+        try:
+            # Get request body
+            content_length = int(self.headers['Content-Length'])
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+            
+            # Get the old and new paths
+            old_path = self.translate_path(self.path)
+            new_name = data.get('newName')
+            
+            if not new_name:
+                self.send_error(400, "New name not provided")
+                return
+                
+            # Create new path
+            new_path = os.path.join(os.path.dirname(old_path), new_name)
+            
+            # Check if target already exists
+            if os.path.exists(new_path):
+                self.send_error(409, "File or folder with that name already exists")
+                return
+                
+            try:
+                os.rename(old_path, new_path)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'status': 'success',
+                    'message': 'Item renamed successfully'
+                }).encode())
+            except OSError as e:
+                self.send_error(500, f"Failed to rename: {str(e)}")
+                
+        except Exception as e:
+            self.send_error(500, f"Server error: {str(e)}")
+
+    def do_DELETE(self):
+        """Handle delete requests"""
+        try:
+            # Get the path of the item to delete
+            path = self.translate_path(self.path)
+            
+            if not os.path.exists(path):
+                self.send_error(404, "File or folder not found")
+                return
+                
+            try:
+                if os.path.isdir(path):
+                    os.rmdir(path)  # This will only delete empty directories
+                else:
+                    os.remove(path)
+                    
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'status': 'success',
+                    'message': 'Item deleted successfully'
+                }).encode())
+            except OSError as e:
+                if os.path.isdir(path):
+                    self.send_error(409, "Directory not empty or permission denied")
+                else:
+                    self.send_error(500, f"Failed to delete: {str(e)}")
+                
+        except Exception as e:
+            self.send_error(500, f"Server error: {str(e)}")
+
     def send_file_manager(self, path):
         """Send the file manager interface"""
         try:
@@ -110,8 +181,8 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
 
         list.sort(key=lambda x: (not os.path.isdir(os.path.join(path, x)), x.lower()))
         
-        # Generate table rows
-        table_rows = self.generate_table_rows(path, list)
+        # Generate grid items
+        grid_items = self.generate_grid_items(path, list)
         
         # Get current time and user
         current_time = "2025-05-03 07:04:45"  # As specified
@@ -122,7 +193,7 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
         display_path = abs_path.replace(os.sep, ' / ')
 
         # Generate and send the HTML
-        html = self.generate_html(current_time, username, abs_path, display_path, table_rows)
+        html = self.generate_html(current_time, username, abs_path, display_path, grid_items)
         encoded = html.encode('utf-8', 'replace')
         
         try:
@@ -137,26 +208,31 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
             print(f"Unexpected error while sending response: {e}")
 
     def generate_table_rows(self, path, list):
+        # Rename function but keep for compatibility
+        return self.generate_grid_items(path, list)
+
+    def generate_grid_items(self, path, list):
         # Fix parent directory navigation
         try:
             rel_path = os.path.relpath(path, os.getcwd())
         except ValueError:
-            # Handle case when path and getcwd are on different drives
             rel_path = path
             
-        # Get parent directory path
         parent_dir = os.path.dirname(rel_path)
-        if parent_dir == '':
-            parent_url = '/'
-        else:
-            parent_url = '/' + parent_dir.replace(os.sep, '/')
+        parent_url = '/' + parent_dir.replace(os.sep, '/') if parent_dir else '/'
             
-        table_rows = [f'''
-            <tr>
-                <td><a href="{urllib.parse.quote(parent_url)}"><i class="fas fa-arrow-up icon"></i> Parent Directory</a></td>
-                <td>-</td>
-                <td>-</td>
-            </tr>
+        grid_items = [f'''
+            <div class="grid-item parent-dir">
+                <div class="item-actions">
+                    <button class="action-btn" disabled title="Parent directory cannot be modified">
+                        <i class="fas fa-ellipsis-v"></i>
+                    </button>
+                </div>
+                <a href="{urllib.parse.quote(parent_url)}">
+                    <i class="fas fa-arrow-up icon"></i>
+                    <span class="name">Parent Directory</span>
+                </a>
+            </div>
         ''']
         
         for name in list:
@@ -182,7 +258,6 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
             except OSError:
                 mtime_str = "N/A"
                 
-            # Update URL path construction
             url_path = os.path.join(
                 os.path.relpath(path, os.getcwd()),
                 name
@@ -191,26 +266,42 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
             if not url_path.startswith('/'):
                 url_path = '/' + url_path
                 
-            # Add row to table with appropriate icon
             if os.path.isdir(fullname):
                 icon = '<i class="fas fa-folder icon"></i>'
                 displayname = name + "/"
-                size_cell = "-"
+                size_info = ""
             else:
                 icon = '<i class="fas fa-file icon"></i>'
-                size_cell = f'<span class="size-badge">{size_str}</span>'
+                size_info = f'<span class="size-badge">{size_str}</span>'
             
-            table_rows.append(f'''
-                <tr>
-                    <td><a href="{urllib.parse.quote(url_path)}">{icon}{displayname}</a></td>
-                    <td>{size_cell}</td>
-                    <td class="date-cell">{mtime_str}</td>
-                </tr>
+            grid_items.append(f'''
+                <div class="grid-item" data-path="{urllib.parse.quote(url_path)}">
+                    <div class="item-actions">
+                        <button class="action-btn" onclick="showActions(this)" title="More actions">
+                            <i class="fas fa-ellipsis-v"></i>
+                        </button>
+                        <div class="action-menu">
+                            <button onclick="renameItem('{displayname}', '{urllib.parse.quote(url_path)}')">
+                                <i class="fas fa-edit"></i> Rename
+                            </button>
+                            <button onclick="deleteItem('{displayname}', '{urllib.parse.quote(url_path)}')">
+                                <i class="fas fa-trash"></i> Delete
+                            </button>
+                        </div>
+                    </div>
+                    <a href="{urllib.parse.quote(url_path)}">
+                        {icon}
+                        <span class="name">{displayname}</span>
+                        {size_info}
+                        <span class="date">{mtime_str}</span>
+                    </a>
+                </div>
             ''')
         
-        return '\n'.join(table_rows)
+        return '\n'.join(grid_items)
 
-    def generate_html(self, current_time, username, abs_path, display_path, table_rows):
+    def generate_html(self, current_time, username, abs_path, display_path, grid_items):
+        # Update the HTML template to use grid instead of table
         return f'''
 <!DOCTYPE html>
 <html>
@@ -233,6 +324,7 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+            text-decoration: none;
         }}
 
         body {{ 
@@ -331,74 +423,111 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
             font-size: 0.875rem;
         }}
 
-        table {{
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0 0.5rem;
+        .grid-container {{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1rem;
+            padding: 1rem 0;
         }}
 
-        th {{
-            padding: 1rem;
-            text-align: left;
-            color: var(--text-secondary);
-            font-weight: 600;
-            font-size: 0.875rem;
-            text-transform: uppercase;
-        }}
-
-        td {{
-            padding: 1rem;
+        .grid-item {{
             background: var(--background-color);
+            border-radius: 0.5rem;
+            padding: 1rem;
+            transition: all 0.2s ease;
+            position: relative;
+        }}
+
+        .grid-item:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            background: #f3f4f6;
+        }}
+
+        .grid-item a {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.5rem;
+            text-align: center;
+        }}
+
+        .grid-item .icon {{
+            font-size: 2rem;
             margin-bottom: 0.5rem;
         }}
 
-        tr:not(:first-child) td:first-child {{
-            border-top-left-radius: 0.5rem;
-            border-bottom-left-radius: 0.5rem;
-        }}
-
-        tr:not(:first-child) td:last-child {{
-            border-top-right-radius: 0.5rem;
-            border-bottom-right-radius: 0.5rem;
-        }}
-
-        tr:not(:first-child):hover td {{
-            background: #f3f4f6;
-            transform: translateY(-1px);
-            transition: all 0.2s ease;
-        }}
-
-        a {{
-            color: var(--text-primary);
-            text-decoration: none;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }}
-
-        a:hover {{
-            color: var(--primary-color);
-        }}
-
-        .icon {{
-            width: 20px;
-            text-align: center;
-            color: var(--primary-color);
-        }}
-
-        .size-badge {{
-            display: inline-block;
-            padding: 0.25rem 0.75rem;
-            background: #e0e7ff;
-            color: var(--primary-color);
-            border-radius: 1rem;
-            font-size: 0.875rem;
+        .grid-item .name {{
             font-weight: 500;
+            word-break: break-word;
         }}
 
-        .date-cell {{
+        .grid-item .size-badge {{
+            font-size: 0.75rem;
+            padding: 0.25rem 0.5rem;
+        }}
+
+        .grid-item .date {{
+            font-size: 0.75rem;
             color: var(--text-secondary);
-            font-size: 0.875rem;
+        }}
+
+        .item-actions {{
+            position: absolute;
+            top: 0.5rem;
+            right: 0.5rem;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }}
+
+        .grid-item:hover .item-actions {{
+            opacity: 1;
+        }}
+
+        .action-btn {{
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.25rem;
+            border-radius: 0.25rem;
+        }}
+
+        .action-btn:hover {{
+            background: var(--border-color);
+        }}
+
+        .action-menu {{
+            position: absolute;
+            top: 100%;
+            right: 0;
+            background: var(--card-background);
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            padding: 0.5rem;
+            display: none;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            z-index: 100;
+        }}
+
+        .action-menu.show {{
+            display: block;
+        }}
+
+        .action-menu button {{
+            display: block;
+            width: 100%;
+            padding: 0.5rem 1rem;
+            text-align: left;
+            background: none;
+            border: none;
+            color: var(--text-primary);
+            cursor: pointer;
+            white-space: nowrap;
+        }}
+
+        .action-menu button:hover {{
+            background: var(--background-color);
         }}
 
         #upload-progress {{
@@ -409,64 +538,19 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
             border-radius: 0.5rem;
         }}
 
-        .progress-bar {{
-            width: 100%;
-            height: 0.5rem;
-            background: var(--border-color);
-            border-radius: 0.25rem;
-            margin-top: 0.5rem;
-        }}
-
-        .progress {{
-            width: 0%;
-            height: 100%;
-            background: var(--primary-color);
-            border-radius: 0.25rem;
-            transition: width 0.3s ease;
-        }}
-
-        @media (max-width: 768px) {{
-            .container {{
-                margin: 1rem auto;
-            }}
-            
-            .card {{
-                padding: 1rem;
-            }}
-
-            th:nth-child(2), 
-            td:nth-child(2) {{
-                display: none;
-            }}
-
-            .path-container {{
-                flex-direction: column;
-                align-items: stretch;
-            }}
-
-            .upload-button {{
-                width: 100%;
-                justify-content: center;
-            }}
+        #upload-progress.show {{
+            display: block;
         }}
 
         @media (prefers-color-scheme: dark) {{
-            :root {{
-                --primary-color: #818cf8;
-                --hover-color: #6366f1;
-                --background-color: #1f2937;
-                --card-background: #111827;
-                --text-primary: #f9fafb;
-                --text-secondary: #9ca3af;
-                --border-color: #374151;
-            }}
-
-            .size-badge {{
-                background: #312e81;
-            }}
-
-            tr:not(:first-child):hover td {{
+            .grid-item:hover {{
                 background: #2d3748;
+            }}
+        }}
+
+        @media (max-width: 768px) {{
+            .grid-container {{
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
             }}
         }}
 
@@ -539,14 +623,9 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
                     </div>
                 </div>
             </div>
-            <table>
-                <tr>
-                    <th>Name</th>
-                    <th>Size</th>
-                    <th>Last Modified</th>
-                </tr>
-                {table_rows}
-            </table>
+            <div class="grid-container">
+                {grid_items}
+            </div>
         </div>
     </div>
 
@@ -567,7 +646,7 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
         const progressBar = document.querySelector('.progress');
         const statusDiv = document.getElementById('upload-status');
         
-        progressDiv.style.display = 'block';
+        progressDiv.classList.add('show');
         let uploadedCount = 0;
         const totalFiles = files.length;
         
@@ -611,6 +690,10 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
             setTimeout(() => {{
                 window.location.href = window.location.href;
             }}, 2000);
+        }} finally {{
+            setTimeout(() => {{
+                progressDiv.classList.remove('show');
+            }}, 2000);
         }}
     }});
 
@@ -626,6 +709,62 @@ class FileManagerHandler(http.server.SimpleHTTPRequestHandler):
 
     // Update time every second
     setInterval(updateServerTime, 1000);
+
+    function showActions(btn) {{
+        const allMenus = document.querySelectorAll('.action-menu');
+        allMenus.forEach(menu => menu.classList.remove('show'));
+        btn.nextElementSibling.classList.add('show');
+    }}
+
+    // Close menus when clicking outside
+    document.addEventListener('click', function(e) {{
+        if (!e.target.closest('.item-actions')) {{
+            document.querySelectorAll('.action-menu').forEach(menu => {{
+                menu.classList.remove('show');
+            }});
+        }}
+    }});
+
+    async function deleteItem(name, path) {{
+        if (confirm(`Are you sure you want to delete "${{name}}"?`)) {{
+            try {{
+                const response = await fetch(path, {{
+                    method: 'DELETE'
+                }});
+                if (response.ok) {{
+                    window.location.reload();
+                }} else {{
+                    alert('Failed to delete item');
+                }}
+            }} catch (error) {{
+                console.error('Delete error:', error);
+                alert('Failed to delete item');
+            }}
+        }}
+    }}
+
+    async function renameItem(name, path) {{
+        const newName = prompt('Enter new name:', name);
+        if (newName && newName !== name) {{
+            try {{
+                const response = await fetch(path, {{
+                    method: 'PATCH',
+                    headers: {{
+                        'Content-Type': 'application/json'
+                    }},
+                    body: JSON.stringify({{ newName }})
+                }});
+                if (response.ok) {{
+                    window.location.reload();
+                }} else {{
+                    alert('Failed to rename item');
+                }}
+            }} catch (error) {{
+                console.error('Rename error:', error);
+                alert('Failed to rename item');
+            }}
+        }}
+    }}
     </script>
 </body>
 </html>
